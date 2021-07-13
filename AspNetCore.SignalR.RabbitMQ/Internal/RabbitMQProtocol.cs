@@ -1,8 +1,10 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using MessagePack;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.AspNetCore.SignalR.Protocol;
@@ -49,7 +51,7 @@ namespace AspNetCore.SignalR.RabbitMQ.Internal
             {
                 var protocol = MessagePackUtil.ReadString(ref data);
                 var serialized = MessagePackUtil.ReadBytes(ref data);
-                serializations[i] = new SerializedMessage(protocol, serialized);
+                serializations[i] = new SerializedMessage(protocol, serialized.Value.ToArray());
             }
 
             return new SerializedHubMessage(serializations);
@@ -74,25 +76,27 @@ namespace AspNetCore.SignalR.RabbitMQ.Internal
             // Any additional items are discarded.
 
             var writer = MemoryBufferWriter.Get();
-
+            MessagePackWriter msgWriter = new MessagePackWriter(writer);
             try
             {
-                MessagePackBinary.WriteArrayHeader(writer, 2);
+                msgWriter.WriteArrayHeader(2);
                 if (excludedConnectionIds != null && excludedConnectionIds.Count > 0)
                 {
-                    MessagePackBinary.WriteArrayHeader(writer, excludedConnectionIds.Count);
+                    msgWriter.WriteArrayHeader(excludedConnectionIds.Count);
                     foreach (var id in excludedConnectionIds)
                     {
-                        MessagePackBinary.WriteString(writer, id);
+                        msgWriter.WriteString(Encoding.UTF8.GetBytes(id));
                     }
                 }
                 else
                 {
-                    MessagePackBinary.WriteArrayHeader(writer, 0);
+                    msgWriter.WriteArrayHeader(0);
                 }
 
-                WriteSerializedHubMessage(writer,
-                    new SerializedHubMessage(new InvocationMessage(methodName, args)));
+                msgWriter.Flush();
+
+                WriteSerializedHubMessage(writer, new SerializedHubMessage(new InvocationMessage(methodName, args)));
+
                 return writer.ToArray();
             }
             finally
@@ -104,14 +108,17 @@ namespace AspNetCore.SignalR.RabbitMQ.Internal
         public byte[] WriteGroupCommand(RabbitMQGroupCommand command)
         {
             var writer = MemoryBufferWriter.Get();
+            MessagePackWriter msgWriter = new MessagePackWriter(writer);
             try
             {
-                MessagePackBinary.WriteArrayHeader(writer, 5);
-                MessagePackBinary.WriteInt32(writer, command.Id);
-                MessagePackBinary.WriteString(writer, command.ServerName);
-                MessagePackBinary.WriteByte(writer, (byte)command.Action);
-                MessagePackBinary.WriteString(writer, command.GroupName);
-                MessagePackBinary.WriteString(writer, command.ConnectionId);
+                msgWriter.WriteArrayHeader( 5);
+                msgWriter.WriteInt32( command.Id);
+                msgWriter.WriteString(Encoding.UTF8.GetBytes(command.ServerName));
+                msgWriter.WriteUInt8( (byte)command.Action);
+                msgWriter.WriteString(Encoding.UTF8.GetBytes(command.GroupName));
+                msgWriter.WriteString(Encoding.UTF8.GetBytes(command.ConnectionId));
+
+                msgWriter.Flush();
 
                 return writer.ToArray();
             }
@@ -140,11 +147,13 @@ namespace AspNetCore.SignalR.RabbitMQ.Internal
             // Any additional items are discarded.
 
             var writer = MemoryBufferWriter.Get();
+            MessagePackWriter msgWriter = new MessagePackWriter(writer);
             try
             {
-                MessagePackBinary.WriteArrayHeader(writer, 1);
-                MessagePackBinary.WriteInt32(writer, messageId);
+                msgWriter.WriteArrayHeader(1);
+                msgWriter.WriteInt32(messageId);
 
+                msgWriter.Flush();
                 return writer.ToArray();
             }
             finally
@@ -162,13 +171,16 @@ namespace AspNetCore.SignalR.RabbitMQ.Internal
         public byte[] WriteList(IReadOnlyList<string> list)
         {
             var writer = MemoryBufferWriter.Get();
+            MessagePackWriter msgWriter = new MessagePackWriter(writer);
             try
             {
-                MessagePackBinary.WriteArrayHeader(writer, list.Count);
+                msgWriter.WriteArrayHeader(list.Count);
                 foreach (var item in list)
                 {
-                    MessagePackBinary.WriteString(writer, item);
+                    msgWriter.WriteString(Encoding.UTF8.GetBytes(item));
                 }
+
+                msgWriter.Flush();
                 return writer.ToArray();
             }
             finally
@@ -191,22 +203,25 @@ namespace AspNetCore.SignalR.RabbitMQ.Internal
             }
             return list;
         }
-        private void WriteSerializedHubMessage(Stream stream, SerializedHubMessage message)
+        private void WriteSerializedHubMessage(MemoryBufferWriter writer, SerializedHubMessage message)
         {
             // Written as a MessagePack 'map' where the keys are the name of the protocol (as a MessagePack 'str')
             // and the values are the serialized blob (as a MessagePack 'bin').
 
-            MessagePackBinary.WriteMapHeader(stream, _protocols.Count);
+            MessagePackWriter msgWriter = new MessagePackWriter(writer);
+            msgWriter.WriteMapHeader(_protocols.Count);
 
             foreach (var protocol in _protocols)
             {
-                MessagePackBinary.WriteString(stream, protocol.Name);
+                msgWriter.WriteString(Encoding.UTF8.GetBytes(protocol.Name));
 
                 var serialized = message.GetSerializedMessage(protocol);
                 var isArray = MemoryMarshal.TryGetArray(serialized, out var array);
                 Debug.Assert(isArray);
-                MessagePackBinary.WriteBytes(stream, array.Array, array.Offset, array.Count);
+                msgWriter.Write(array.Array);
             }
+
+            msgWriter.Flush();
         }
     }
 }
